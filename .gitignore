@@ -65,6 +65,9 @@ backend/data/users.json
 
 # Python virtual environment
 .venv/
+backend/.venv-paninian/
+backend/data/paninian-appdata/
+backend/data/huggingface-cache/
 
 # PowerShell-generated cache
 Microsoft/

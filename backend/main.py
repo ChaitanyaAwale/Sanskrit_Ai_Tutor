@@ -51,7 +51,15 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 # Initialize modules
 db = MockDB(data_dir=DATA_DIR)
 learning_engine = AdaptiveLearning(lessons_file=os.path.join(DATA_DIR, 'lessons.json'))
-nlp = SanskritNLP()
+_previous_appdata = os.environ.get("APPDATA")
+os.environ["APPDATA"] = os.path.join(DATA_DIR, "paninian-appdata")
+try:
+    nlp = SanskritNLP()
+finally:
+    if _previous_appdata is None:
+        os.environ.pop("APPDATA", None)
+    else:
+        os.environ["APPDATA"] = _previous_appdata
 auth = Authenticator(users_file=os.path.join(DATA_DIR, 'users.json'))
 translator = SanskritTranslator(
     csv_path=os.path.join(DATA_DIR, 'sanskrit_words.csv'),
@@ -522,6 +530,18 @@ def check_grammar(req: GrammarRequest):
         "bkt_updates": bkt_updates,
         "skipped_issues": skipped_issues,
         "recommendation": recommendation,
+    }
+
+
+@app.get("/grammar/status")
+def grammar_status():
+    analyzer = nlp.paninian
+    prakriya_ready = bool(analyzer and analyzer.prakriya)
+    return {
+        "engine": "Paninian Prakriya" if prakriya_ready else "Local fallback",
+        "paninian_available": prakriya_ready,
+        "verb_form_generator_available": bool(analyzer and analyzer.generator),
+        "scope": "Sanskrit verb morphology and derivation",
     }
 
 @app.get("/dashboard/stats/{username}")

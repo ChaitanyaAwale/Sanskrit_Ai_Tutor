@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 BASE_MODEL = "facebook/nllb-200-distilled-600M"
 
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
+MODEL_CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "huggingface-cache"
 
 EN_TO_SA_ADAPTER = MODEL_DIR / "English_To_Sanskrit"
 SA_TO_EN_ADAPTER = (
@@ -44,11 +45,18 @@ class LocalSanskritTranslator:
 
         logger.info("Loading NLLB tokenizer and base model...")
 
-        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+        # Keep the sizeable shared NLLB base model in a stable, project-local
+        # cache. The adapters above are already stored in backend/models.
+        MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            BASE_MODEL,
+            cache_dir=str(MODEL_CACHE_DIR),
+        )
 
         base_model = AutoModelForSeq2SeqLM.from_pretrained(
             BASE_MODEL,
             torch_dtype=torch.float32,
+            cache_dir=str(MODEL_CACHE_DIR),
         )
 
         model = PeftModel.from_pretrained(

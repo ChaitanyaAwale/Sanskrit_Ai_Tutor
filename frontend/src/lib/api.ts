@@ -98,6 +98,7 @@ export const api = {
       apiRequest(`/progress/${username}/quiz`, { method: 'POST', body: JSON.stringify(data) }),
   },
   tools: {
+    getGrammarStatus: () => apiRequest('/grammar/status'),
     translate: (data: { text: string; direction: string; use_api?: boolean }) => 
       apiRequest('/translate', { method: 'POST', body: JSON.stringify(data) }),
     checkGrammar: (text: string, use_ai: boolean = false, username?: string) =>

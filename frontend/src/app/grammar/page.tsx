@@ -12,15 +12,14 @@ import {
   AlertCircle,
   FileText,
   Loader2,
-  Zap
 } from "lucide-react";
 
 export default function Grammar() {
   const [user, setUser] = useState<any>(null);
   const [inputText, setInputText] = useState("");
   const [analysis, setAnalysis] = useState<any>(null);
+  const [grammarStatus, setGrammarStatus] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [useAi, setUseAi] = useState(false);
   const router = useRouter();
 
   // Safely mount user without depending on router
@@ -38,6 +37,9 @@ export default function Grammar() {
       localStorage.setItem("user", JSON.stringify(userData));
     }
     if (isMounted) setUser(userData);
+    api.tools.getGrammarStatus()
+      .then(setGrammarStatus)
+      .catch((err) => console.error("Failed to load grammar engine status", err));
     return () => { isMounted = false; };
   }, []);
 
@@ -46,7 +48,7 @@ export default function Grammar() {
     setLoading(true);
     setAnalysis(null);
     try {
-      const res = await api.tools.checkGrammar(inputText, useAi, user?.username);
+      const res = await api.tools.checkGrammar(inputText, false, user?.username);
       setAnalysis(res);
     } catch (err) {
       console.error(err);
@@ -68,7 +70,7 @@ export default function Grammar() {
           style={{ marginBottom: '40px' }}
         >
           <h1 style={{ fontSize: '2.5rem', marginBottom: '8px' }}>Vyakaraņa Check</h1>
-          <p style={{ color: 'var(--text-dim)' }}>Precision analysis of your Sanskrit construction and syntax.</p>
+          <p style={{ color: 'var(--text-dim)' }}>Paninian verb morphology and Sanskrit syntax analysis.</p>
         </motion.header>
 
         <section className="grid" style={{ gridTemplateColumns: '1fr 1.2fr', gap: '30px' }}>
@@ -99,47 +101,9 @@ export default function Grammar() {
               </div>
 
               <div className="flex justify-between items-center">
-                {/* Custom Framer Motion Toggle Switch */}
-                <div
-                  className="flex items-center gap-3 cursor-pointer group"
-                  onClick={() => setUseAi(!useAi)}
-                >
-                  <div
-                    style={{
-                      width: '46px',
-                      height: '24px',
-                      borderRadius: '24px',
-                      background: useAi ? 'var(--primary)' : 'var(--border-soft)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      padding: '2px',
-                      transition: 'background 0.3s ease'
-                    }}
-                  >
-                    <motion.div
-                      layout
-                      animate={{ x: useAi ? 22 : 0 }}
-                      transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                      style={{
-                        width: '20px',
-                        height: '20px',
-                        borderRadius: '50%',
-                        background: 'white',
-                        boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-                      }}
-                    />
-                  </div>
-                  <span style={{
-                    fontSize: '0.75rem',
-                    fontWeight: '800',
-                    color: useAi ? 'var(--primary)' : 'var(--text-dim)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '1px',
-                    transition: 'color 0.3s ease'
-                  }}>
-                    AI Verification (Grok)
-                  </span>
-                </div>
+                <span style={{ fontSize: '0.75rem', fontWeight: '800', color: grammarStatus?.paninian_available ? 'var(--accent)' : 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                  {grammarStatus?.paninian_available ? 'Paninian analyzer ready' : 'Paninian analyzer unavailable'}
+                </span>
 
                 <button
                   className="btn-primary"
@@ -147,8 +111,8 @@ export default function Grammar() {
                   disabled={loading || !inputText}
                   style={{ padding: '12px 30px', display: 'flex', alignItems: 'center', gap: '8px' }}
                 >
-                  {loading ? <Loader2 className="animate-spin" size={18} /> : useAi ? <Zap size={18} fill="currentColor" /> : <ShieldCheck size={18} />}
-                  <span>{loading ? "Analyzing..." : useAi ? "AI Deep Scan" : "Verify Syntax"}</span>
+                  {loading ? <Loader2 className="animate-spin" size={18} /> : <ShieldCheck size={18} />}
+                  <span>{loading ? "Analyzing..." : "Analyze Grammar"}</span>
                 </button>
               </div>
             </div>
@@ -222,9 +186,9 @@ export default function Grammar() {
                           </p>
                         </div>
                       </div>
-                      {analysis.ai_verified && (
+                      {analysis.analysis_mode === "Paninian Grammar Check" && (
                         <div className="flex items-center gap-2" style={{ color: 'var(--primary)', padding: '6px 12px', background: 'rgba(var(--primary-rgb), 0.1)', borderRadius: '10px', fontSize: '0.7rem', fontWeight: '800' }}>
-                          <Zap size={14} fill="currentColor" /> GROK VERIFIED
+                          <ShieldCheck size={14} /> PANINIAN ANALYSIS
                         </div>
                       )}
                     </div>

@@ -214,8 +214,12 @@ class SanskritNLP:
         self.paninian = None
         if PANINIAN_AVAILABLE:
             try:
-                self.paninian = PaninianAnalyzer()
-                print("SanskritNLP: Paninian verb analyzer ready")
+                paninian = PaninianAnalyzer()
+                if paninian.prakriya is not None:
+                    self.paninian = paninian
+                    print("SanskritNLP: Paninian verb analyzer ready")
+                else:
+                    print(f"SanskritNLP: Paninian analyzer unavailable: {paninian._init_error}")
             except Exception as e:
                 print(f"SanskritNLP: Paninian init failed: {e}")
 
@@ -738,7 +742,7 @@ class SanskritNLP:
             "breakdown": breakdown,
             "word_count": len(sanskrit_words),
             "translation": translation,
-            "analysis_mode": "Grammar Check",
+            "analysis_mode": "Paninian Grammar Check" if self.paninian and self.paninian.prakriya else "Rule-Based Grammar Check",
             "ai_verified": False,
             "source_counts": source_counts,
         }

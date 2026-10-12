@@ -58,3 +58,16 @@ Thumbs.db
 # Repomix
 repomix-output.xml
 repomix.*
+
+
+# Local model weights and checkpoints
+backend/models/
+
+# Private user data
+backend/data/users.json
+
+# Python virtual environment
+.venv/
+
+# PowerShell-generated cache
+Microsoft/

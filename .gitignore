@@ -60,9 +60,6 @@ repomix-output.xml
 repomix.*
 
 
-# Local model weights and checkpoints
-backend/models/
-
 # Private user data
 backend/data/users.json
 

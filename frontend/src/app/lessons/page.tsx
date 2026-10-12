@@ -234,6 +234,7 @@ export default function Lessons() {
   const [user, setUser] = useState<any>(null);
   const [lessons, setLessons] = useState<any[]>([]);
   const [masteryMap, setMasteryMap] = useState<Record<number, number>>({});
+  const [completedLessonIds, setCompletedLessonIds] = useState<Set<string>>(new Set());
   const [masteryLoading, setMasteryLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [selectedLesson, setSelectedLesson] = useState<any>(null);
@@ -278,8 +279,12 @@ export default function Lessons() {
     const fetchMastery = async () => {
       if (user?.username) {
         try {
-          const data = await api.user.getBKTMastery(user.username);
-          setMasteryMap(data.mastery);
+          const [data, progress] = await Promise.all([
+            api.user.getBKTMastery(user.username),
+            api.user.getProgress(user.username),
+          ]);
+          setMasteryMap(data.mastery || {});
+          setCompletedLessonIds(new Set((progress.completed_lesson_ids || []).map(String)));
         } catch (err) {
           console.error("Failed to fetch mastery", err);
         } finally {
@@ -298,11 +303,8 @@ export default function Lessons() {
   const handleMarkComplete = async () => {
     if (!selectedLesson || !user?.username) return;
     try {
-      await api.lesson.attempt({
-        lesson_id: selectedLesson.id,
-        correct: true,
-        username: user.username,
-      });
+      await api.user.completeLesson(user.username, selectedLesson.id);
+      setCompletedLessonIds((current) => new Set(current).add(String(selectedLesson.id)));
       showToast("✨ Lesson mastered! +50 XP");
     } catch (err) {
       console.error(err);
@@ -343,7 +345,7 @@ export default function Lessons() {
 
   const getCompletionCount = (level: string) => {
     const levelLessons = lessons.filter(l => l.level === level);
-    const completed = levelLessons.filter(l => l.id <= 10); // Mock progress
+    const completed = levelLessons.filter(l => completedLessonIds.has(String(l.id)));
     return { total: levelLessons.length, completed: completed.length };
   };
 

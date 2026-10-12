@@ -355,12 +355,12 @@ class SQLiteRepository:
             ).fetchall()
         return [row["activity_date"] for row in rows]
 
-    def get_streak_summary(self, user_id: int, as_of_utc_date: Optional[str] = None) -> Dict[str, int]:
+    def get_streak_summary(self, user_id: int, as_of_utc_date: Optional[str] = None) -> Dict[str, Any]:
         if not isinstance(user_id, int) or user_id <= 0:
             raise ValueError("user_id must be a positive integer")
         active_dates = set(self.get_active_dates(user_id))
         if not active_dates:
-            return {"current_streak": 0, "longest_streak": 0, "active_days": 0}
+            return {"current_streak": 0, "longest_streak": 0, "active_days": 0, "active_today": False}
 
         today = self._normalize_utc_date(as_of_utc_date, "as_of_utc_date")
         today_date = date.fromisoformat(today)
@@ -370,7 +370,12 @@ class SQLiteRepository:
         if streak_start.isoformat() not in active_dates:
             previous_day = streak_start - timedelta(days=1)
             if previous_day.isoformat() not in active_dates:
-                return {"current_streak": 0, "longest_streak": 0, "active_days": len(active_dates)}
+                return {
+                    "current_streak": 0,
+                    "longest_streak": 0,
+                    "active_days": len(active_dates),
+                    "active_today": today in active_dates,
+                }
             streak_start = previous_day
 
         cursor_date = streak_start
@@ -396,6 +401,7 @@ class SQLiteRepository:
             "current_streak": current_streak,
             "longest_streak": longest_streak,
             "active_days": len(active_dates),
+            "active_today": today in active_dates,
         }
 
     def complete_lesson(

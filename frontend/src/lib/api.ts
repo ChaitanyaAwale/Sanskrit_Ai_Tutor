@@ -1,4 +1,4 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8005';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export async function apiRequest(endpoint: string, options: RequestInit = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
@@ -73,19 +73,21 @@ export const api = {
     getChandas: () => apiRequest('/api/lessons/chandas'),
   },
   user: {
-    getProgress: (username: string) => apiRequest(`/progress/${username}`),
+    getProgress: (username: string, asOfDate?: string) =>
+      apiRequest(`/progress/${username}${asOfDate ? `?as_of_date=${encodeURIComponent(asOfDate)}` : ''}`),
     getActivities: (username: string) => apiRequest(`/activities/${username}`),
     getDashboardStats: (username: string) => apiRequest(`/dashboard/stats/${username}`),
     getRecommendation: (username: string) => apiRequest(`/recommendation/${username}`),
     getBKTSummary: (username: string) => apiRequest(`/bkt/summary/${username}`),
     getBKTMastery: (username: string) => apiRequest(`/bkt/mastery/${username}`),
     getPersistentDashboard: (username: string) => apiRequest(`/dashboard/${username}`),
-    getStreak: (username: string) => apiRequest(`/streak/${username}`),
+    getStreak: (username: string, asOfDate?: string) =>
+      apiRequest(`/streak/${username}${asOfDate ? `?as_of_date=${encodeURIComponent(asOfDate)}` : ''}`),
     getGrammarHistory: (username: string, limit = 20) => apiRequest(`/grammar/history/${username}?limit=${limit}`),
-    recordDailyActivity: (username: string, score_percent = 100) =>
+    recordDailyActivity: (username: string, score_percent = 100, activity_date?: string) =>
       apiRequest(`/streak/${username}/activity`, {
         method: 'POST',
-        body: JSON.stringify({ score_percent }),
+        body: JSON.stringify({ score_percent, ...(activity_date ? { activity_date } : {}) }),
       }),
     completeLesson: (username: string, lesson_id: number | string) =>
       apiRequest(`/progress/${username}/complete`, {

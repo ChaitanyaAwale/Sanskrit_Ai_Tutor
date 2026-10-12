@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Body
+from fastapi import FastAPI, HTTPException, Depends, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Any
 import sys
@@ -315,14 +315,15 @@ def get_daily_questions():
         return json.load(questions_file)
 
 @app.get("/progress/{username}")
-def get_progress(username: str):
+def get_progress(username: str, as_of_date: Optional[str] = Query(None)):
     progress = db.get_user_progress(username)
     user_id = _ensure_learning_user(username)
     completed_ids = list(learning_db.get_completed_lesson_ids(user_id))
-    streak = learning_db.get_streak_summary(user_id)
+    streak = learning_db.get_streak_summary(user_id, as_of_utc_date=as_of_date)
     # Keep the legacy fields and add persisted completion/streak details.
     return {
         **progress,
+        "total_lessons": len(learning_engine.lessons),
         "completed_lesson_ids": completed_ids,
         "lessons_completed": max(int(progress.get("completed", 0)), len(completed_ids)),
         "current_streak": streak["current_streak"],
@@ -361,8 +362,8 @@ def get_persisted_dashboard(username: str):
 
 
 @app.get("/streak/{username}")
-def get_learning_streak(username: str):
-    return learning_db.get_streak_summary(_ensure_learning_user(username))
+def get_learning_streak(username: str, as_of_date: Optional[str] = Query(None)):
+    return learning_db.get_streak_summary(_ensure_learning_user(username), as_of_utc_date=as_of_date)
 
 
 @app.post("/streak/{username}/activity")
@@ -389,7 +390,7 @@ def complete_lesson(username: str, payload: Dict[str, Any] = Body(...)):
     completion = learning_db.complete_lesson(user_id, str(lesson_id))
     if completion["created"]:
         db.update_progress(username, int(lesson_id), "completed")
-        learning_db.record_learning_day(user_id, source="lesson")
+    learning_db.record_learning_day(user_id, source="lesson")
     return {
         "success": True,
         "username": username,

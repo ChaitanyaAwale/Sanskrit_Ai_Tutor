@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion } from "framer-motion";
+import { api } from '@/lib/api';
 import { 
   LayoutGrid, 
   Library, 
@@ -22,12 +23,32 @@ const Sidebar = ({ user }: { user: any }) => {
   const pathname = usePathname();
   const router = useRouter();
   const [theme, setTheme] = useState('light');
+  const [streak, setStreak] = useState(0);
 
   useEffect(() => {
     const savedTheme = localStorage.getItem('theme') || 'light';
     setTheme(savedTheme);
     document.documentElement.setAttribute('data-theme', savedTheme);
   }, []);
+
+  useEffect(() => {
+    if (!user?.username) return;
+    const now = new Date();
+    const asOfDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const refreshStreak = () => {
+      api.user.getStreak(user.username, asOfDate)
+        .then((summary) => setStreak(summary.current_streak || 0))
+        .catch(() => setStreak(0));
+    };
+    const handleStreakUpdate = (event: Event) => {
+      const value = (event as CustomEvent<number>).detail;
+      if (typeof value === 'number') setStreak(value);
+      else refreshStreak();
+    };
+    refreshStreak();
+    window.addEventListener('daily-streak-updated', handleStreakUpdate);
+    return () => window.removeEventListener('daily-streak-updated', handleStreakUpdate);
+  }, [user?.username]);
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -53,9 +74,6 @@ const Sidebar = ({ user }: { user: any }) => {
     localStorage.removeItem('user');
     router.push('/');
   };
-
-  // Calculate streak from localStorage
-  const streak = parseInt(localStorage.getItem('sanskrit_streak') || '0', 10);
 
   return (
     <motion.aside 

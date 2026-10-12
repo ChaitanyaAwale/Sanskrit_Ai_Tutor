@@ -37,7 +37,9 @@ export default function Progress() {
 
     const fetchProgress = async () => {
       try {
-        const data = await api.user.getProgress(userData.username);
+        const now = new Date();
+        const asOfDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        const data = await api.user.getProgress(userData.username, asOfDate);
         setProgress(data);
       } catch (err) {
         console.error(err);

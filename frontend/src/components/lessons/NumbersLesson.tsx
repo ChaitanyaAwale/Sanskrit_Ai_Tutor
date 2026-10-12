@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '@/lib/api';
+import AudioPronounceButton from '@/components/AudioPronounceButton';
 
 interface NumberItem {
     id: string;
@@ -154,6 +155,7 @@ export default function NumbersLesson({ onBack }: { onBack: () => void }) {
                                         <div className="devanagari" style={{ fontSize: item.sanskrit.length > 8 ? '2.8rem' : '3.8rem', fontWeight: 900, marginBottom: '8px', textShadow: '0 8px 16px rgba(0,0,0,0.25)', color: '#fff' }}>
                                             {item.sanskrit}
                                         </div>
+                                        <AudioPronounceButton text={item.sanskrit} size={22} title={`Pronounce ${item.sanskrit}`} />
                                         <div style={{ fontSize: '1.2rem', fontWeight: 800, letterSpacing: '1px', textTransform: 'uppercase', color: '#fff', textShadow: '0 2px 5px rgba(0,0,0,0.1)' }}>
                                             {item.transliteration}
                                         </div>

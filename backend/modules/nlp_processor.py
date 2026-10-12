@@ -1,6 +1,24 @@
 """
 NLP processor for Sanskrit text analysis
-Uses rule-based and pre-trained models for demo
+
+Pipeline:
+  1. Dictionary lookup (highest priority)
+     - Verb entries are enriched with Paninian morphology
+  2. Noun analyzer (declension rules)
+  3. Paninian verb analyzer (Prakriya)
+  4. AI fallback (only when use_ai=True)
+
+Correction:
+  - Missing Purna Virama
+  - Destination → accusative (motion verbs)
+  - Subject-verb agreement, via:
+      1. Prakriya VerbFormGenerator (general)
+      2. Local PARADIGM_TABLE (common roots)
+      3. Suffix-stripping fallback (regular लट् verbs)
+
+Output contract:
+  { score, issues, corrected_sentence, breakdown, word_count,
+    translation, analysis_mode, ai_verified, source_counts }
 """
 
 import re
@@ -8,402 +26,849 @@ import random
 import os
 import requests
 import json
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 from dotenv import load_dotenv
 
-# Load environment variables explicitly from current directory
+# Load environment
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
 load_dotenv(dotenv_path=env_path)
 
-# Handle NLTK import gracefully
+# ── NLTK (optional) ─────────────────────────────────────────────
 try:
     import nltk
     from nltk.tokenize import word_tokenize
     NLTK_AVAILABLE = True
-    
-    # Download required NLTK data if not already present
     try:
         nltk.data.find('tokenizers/punkt')
     except LookupError:
         print("Downloading NLTK punkt tokenizer...")
         nltk.download('punkt', quiet=True)
-        
 except ImportError:
     NLTK_AVAILABLE = False
     print("NLTK not installed. Using basic tokenization.")
 
+# ── Paninian verb analyzer ──────────────────────────────────────
+try:
+    from modules.paninian_analyzer import PaninianAnalyzer
+    PANINIAN_AVAILABLE = True
+except ImportError as e:
+    PANINIAN_AVAILABLE = False
+    print(f"Paninian analyzer not available: {e}")
+
+# ── Noun analyzer ───────────────────────────────────────────────
+try:
+    from modules.noun_analyzer import NounAnalyzer
+    NOUN_AVAILABLE = True
+except ImportError as e:
+    NOUN_AVAILABLE = False
+    print(f"Noun analyzer not available: {e}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Fallback verb paradigm table
+# Used only when the Prakriya generator cannot produce the form.
+# Covers लट् (present tense) for ~15 common roots.
+# ─────────────────────────────────────────────────────────────
+PARADIGM_TABLE = {
+    'gam': {  # गम् — to go
+        'first':  {'singular': 'गच्छामि', 'dual': 'गच्छावः', 'plural': 'गच्छामः'},
+        'second': {'singular': 'गच्छसि',  'dual': 'गच्छथः', 'plural': 'गच्छथ'},
+        'third':  {'singular': 'गच्छति',  'dual': 'गच्छतः', 'plural': 'गच्छन्ति'},
+    },
+    'paW': {  # पठ् — to read
+        'first':  {'singular': 'पठामि', 'dual': 'पठावः', 'plural': 'पठामः'},
+        'second': {'singular': 'पठसि',  'dual': 'पठथः', 'plural': 'पठथ'},
+        'third':  {'singular': 'पठति',  'dual': 'पठतः', 'plural': 'पठन्ति'},
+    },
+    'KAd': {  # खाद् — to eat
+        'first':  {'singular': 'खादामि', 'dual': 'खादावः', 'plural': 'खादामः'},
+        'second': {'singular': 'खादसि',  'dual': 'खादथः', 'plural': 'खादथ'},
+        'third':  {'singular': 'खादति',  'dual': 'खादतः', 'plural': 'खादन्ति'},
+    },
+    'pA': {   # पा — to drink
+        'first':  {'singular': 'पिबामि', 'dual': 'पिबावः', 'plural': 'पिबामः'},
+        'second': {'singular': 'पिबसि',  'dual': 'पिबथः', 'plural': 'पिबथ'},
+        'third':  {'singular': 'पिबति',  'dual': 'पिबतः', 'plural': 'पिबन्ति'},
+    },
+    'as': {   # अस् — to be
+        'first':  {'singular': 'अस्मि',  'dual': 'स्वः', 'plural': 'स्मः'},
+        'second': {'singular': 'असि',   'dual': 'स्थः', 'plural': 'स्थ'},
+        'third':  {'singular': 'अस्ति',  'dual': 'स्तः', 'plural': 'सन्ति'},
+    },
+    'kR': {   # कृ — to do
+        'first':  {'singular': 'करोमि', 'dual': 'कुर्वः',  'plural': 'कुर्मः'},
+        'second': {'singular': 'करोषि', 'dual': 'कुरुथः', 'plural': 'कुरुथ'},
+        'third':  {'singular': 'करोति', 'dual': 'कुरुतः', 'plural': 'कुर्वन्ति'},
+    },
+    'BU': {   # भू — to be / become
+        'first':  {'singular': 'भवामि', 'dual': 'भवावः', 'plural': 'भवामः'},
+        'second': {'singular': 'भवसि',  'dual': 'भवथः', 'plural': 'भवथ'},
+        'third':  {'singular': 'भवति',  'dual': 'भवतः', 'plural': 'भवन्ति'},
+    },
+    'Bav': {  # alternate SLP1 key
+        'first':  {'singular': 'भवामि', 'dual': 'भवावः', 'plural': 'भवामः'},
+        'second': {'singular': 'भवसि',  'dual': 'भवथः', 'plural': 'भवथ'},
+        'third':  {'singular': 'भवति',  'dual': 'भवतः', 'plural': 'भवन्ति'},
+    },
+    'liK': {  # लिख् — to write
+        'first':  {'singular': 'लिखामि', 'dual': 'लिखावः', 'plural': 'लिखामः'},
+        'second': {'singular': 'लिखसि',  'dual': 'लिखथः', 'plural': 'लिखथ'},
+        'third':  {'singular': 'लिखति',  'dual': 'लिखतः', 'plural': 'लिखन्ति'},
+    },
+    'krIq': {  # क्रीड् — to play
+        'first':  {'singular': 'क्रीडामि', 'dual': 'क्रीडावः', 'plural': 'क्रीडामः'},
+        'second': {'singular': 'क्रीडसि',  'dual': 'क्रीडथः', 'plural': 'क्रीडथ'},
+        'third':  {'singular': 'क्रीडति',  'dual': 'क्रीडतः', 'plural': 'क्रीडन्ति'},
+    },
+    'car': {  # चर् — to walk
+        'first':  {'singular': 'चरामि', 'dual': 'चरावः', 'plural': 'चरामः'},
+        'second': {'singular': 'चरसि',  'dual': 'चरथः', 'plural': 'चरथ'},
+        'third':  {'singular': 'चरति',  'dual': 'चरतः', 'plural': 'चरन्ति'},
+    },
+    'DAv': {  # धाव् — to run
+        'first':  {'singular': 'धावामि', 'dual': 'धावावः', 'plural': 'धावामः'},
+        'second': {'singular': 'धावसि',  'dual': 'धावथः', 'plural': 'धावथ'},
+        'third':  {'singular': 'धावति',  'dual': 'धावतः', 'plural': 'धावन्ति'},
+    },
+    'svap': {  # स्वप् — to sleep
+        'first':  {'singular': 'स्वपामि', 'dual': 'स्वपावः', 'plural': 'स्वपामः'},
+        'second': {'singular': 'स्वपसि',  'dual': 'स्वपथः', 'plural': 'स्वपथ'},
+        'third':  {'singular': 'स्वपति',  'dual': 'स्वपतः', 'plural': 'स्वपन्ति'},
+    },
+    'zru': {  # श्रु — to hear
+        'first':  {'singular': 'शृणोमि', 'dual': 'शृणुवः',  'plural': 'शृणुमः'},
+        'second': {'singular': 'शृणोषि', 'dual': 'शृणुथः', 'plural': 'शृणुथ'},
+        'third':  {'singular': 'शृणोति', 'dual': 'शृणुतः', 'plural': 'शृण्वन्ति'},
+    },
+    'dRz': {  # दृश् — to see
+        'first':  {'singular': 'पश्यामि', 'dual': 'पश्यावः', 'plural': 'पश्यामः'},
+        'second': {'singular': 'पश्यसि',  'dual': 'पश्यथः', 'plural': 'पश्यथ'},
+        'third':  {'singular': 'पश्यति',  'dual': 'पश्यतः', 'plural': 'पश्यन्ति'},
+    },
+    'vad': {  # वद् — to speak
+        'first':  {'singular': 'वदामि', 'dual': 'वदावः', 'plural': 'वदामः'},
+        'second': {'singular': 'वदसि',  'dual': 'वदथः', 'plural': 'वदथ'},
+        'third':  {'singular': 'वदति',  'dual': 'वदतः', 'plural': 'वदन्ति'},
+    },
+    'has': {  # हस् — to laugh
+        'first':  {'singular': 'हसामि', 'dual': 'हसावः', 'plural': 'हसामः'},
+        'second': {'singular': 'हससि',  'dual': 'हसथः', 'plural': 'हसथ'},
+        'third':  {'singular': 'हसति',  'dual': 'हसतः', 'plural': 'हसन्ति'},
+    },
+}
+
+
 class SanskritNLP:
     def __init__(self):
-        # Mock Sanskrit vocabulary database
+        # ── Dictionary (curated) ────────────────────────────────
         self.vocabulary = {
-            "रामः": {"pos": "noun", "gender": "masculine", "case": "nominative", "number": "singular", "meaning": "Rama"},
-            "वनम्": {"pos": "noun", "gender": "neuter", "case": "accusative", "number": "singular", "meaning": "forest"},
-            "गच्छति": {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "goes"},
-            "गच्छामि": {"pos": "verb", "tense": "present", "person": "first", "number": "singular", "meaning": "I go"},
-            "सीता": {"pos": "noun", "gender": "feminine", "case": "nominative", "number": "singular", "meaning": "Sita"},
-            "अस्ति": {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "is"},
-            "सुतः": {"pos": "noun", "gender": "masculine", "case": "nominative", "number": "singular", "meaning": "son"},
-            "पुस्तकम्": {"pos": "noun", "gender": "neuter", "case": "nominative", "number": "singular", "meaning": "book"},
-            "पठति": {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "reads"},
-            "खादति": {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "eats"},
-            "फलम्": {"pos": "noun", "gender": "neuter", "case": "nominative", "number": "singular", "meaning": "fruit"},
-            "बालकः": {"pos": "noun", "gender": "masculine", "case": "nominative", "number": "singular", "meaning": "boy"},
-            "अहं": {"pos": "pronoun", "case": "nominative", "number": "singular", "meaning": "I"},
-            "अहम्": {"pos": "pronoun", "case": "nominative", "number": "singular", "meaning": "I"},
-            "विद्यालय": {"pos": "noun", "gender": "masculine", "case": "base", "number": "singular", "meaning": "school"},
+            # Nouns
+            "रामः":    {"pos": "noun", "gender": "masculine", "case": "nominative", "number": "singular", "meaning": "Rama"},
+            "वनम्":    {"pos": "noun", "gender": "neuter",    "case": "accusative", "number": "singular", "meaning": "forest"},
+            "सीता":    {"pos": "noun", "gender": "feminine",  "case": "nominative", "number": "singular", "meaning": "Sita"},
+            "सुतः":    {"pos": "noun", "gender": "masculine", "case": "nominative", "number": "singular", "meaning": "son"},
+            "पुस्तकम्": {"pos": "noun", "gender": "neuter",    "case": "nominative", "number": "singular", "meaning": "book"},
+            "फलम्":    {"pos": "noun", "gender": "neuter",    "case": "nominative", "number": "singular", "meaning": "fruit"},
+            "बालकः":   {"pos": "noun", "gender": "masculine", "case": "nominative", "number": "singular", "meaning": "boy"},
+            "बालिका":  {"pos": "noun", "gender": "feminine",  "case": "nominative", "number": "singular", "meaning": "girl"},
+            "विद्यालय": {"pos": "noun", "gender": "masculine", "case": "base",       "number": "singular", "meaning": "school"},
             "विद्यालयम्": {"pos": "noun", "gender": "masculine", "case": "accusative", "number": "singular", "meaning": "school (to)"},
-            "विद्यालयं": {"pos": "noun", "gender": "masculine", "case": "accusative", "number": "singular", "meaning": "school (to)"},
+            "विद्यालयं":  {"pos": "noun", "gender": "masculine", "case": "accusative", "number": "singular", "meaning": "school (to)"},
+            "गृहम्":   {"pos": "noun", "gender": "neuter",    "case": "nominative", "number": "singular", "meaning": "house"},
+            "जलम्":    {"pos": "noun", "gender": "neuter",    "case": "nominative", "number": "singular", "meaning": "water"},
+            "ग्रामः":  {"pos": "noun", "gender": "masculine", "case": "nominative", "number": "singular", "meaning": "village"},
+            "ग्रामम्": {"pos": "noun", "gender": "masculine", "case": "accusative", "number": "singular", "meaning": "village (to)"},
+
+            # Pronouns
+            "अहं":     {"pos": "pronoun", "case": "nominative", "number": "singular", "person": "first",  "meaning": "I"},
+            "अहम्":    {"pos": "pronoun", "case": "nominative", "number": "singular", "person": "first",  "meaning": "I"},
+            "सः":      {"pos": "pronoun", "case": "nominative", "number": "singular", "person": "third",  "gender": "masculine", "meaning": "he"},
+            "सा":      {"pos": "pronoun", "case": "nominative", "number": "singular", "person": "third",  "gender": "feminine",  "meaning": "she"},
+            "तत्":     {"pos": "pronoun", "case": "nominative", "number": "singular", "person": "third",  "gender": "neuter",    "meaning": "it"},
+            "त्वम्":   {"pos": "pronoun", "case": "nominative", "number": "singular", "person": "second", "meaning": "you"},
+            "ते":      {"pos": "pronoun", "case": "nominative", "number": "plural",   "person": "third",  "meaning": "they"},
+            "वयम्":    {"pos": "pronoun", "case": "nominative", "number": "plural",   "person": "first",  "meaning": "we"},
+
+            # Verbs
+            "गच्छति":  {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "goes"},
+            "गच्छामि": {"pos": "verb", "tense": "present", "person": "first", "number": "singular", "meaning": "I go"},
+            "गच्छसि":  {"pos": "verb", "tense": "present", "person": "second", "number": "singular", "meaning": "you go"},
+            "गच्छन्ति": {"pos": "verb", "tense": "present", "person": "third", "number": "plural", "meaning": "they go"},
+            "अस्ति":   {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "is"},
+            "पठति":    {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "reads"},
+            "पठन्ति":  {"pos": "verb", "tense": "present", "person": "third", "number": "plural", "meaning": "they read"},
+            "खादति":   {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "eats"},
+            "पिबति":   {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "drinks"},
+            "करोति":   {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "does"},
+            "भवति":    {"pos": "verb", "tense": "present", "person": "third", "number": "singular", "meaning": "becomes"},
         }
-        
-        # Grammar rules (simplified for demo)
+
         self.grammar_rules = [
-            {"rule": "Subject-verb agreement", "pattern": r".*ः.*ति$", "description": "Nominative noun should agree with verb"},
-            {"rule": "Case endings", "pattern": r".*म्$", "description": "Accusative case ending for objects"},
+            {"rule": "Subject-verb agreement", "pattern": r".*ः.*ति$",
+             "description": "Nominative noun should agree with verb"},
+            {"rule": "Case endings", "pattern": r".*म्$",
+             "description": "Accusative case ending for objects"},
         ]
-        
-        # AI Configuration - Support both xAI (Grok) and Groq (gsk_...)
+
+        # ── Analyzers ───────────────────────────────────────────
+        self.paninian = None
+        if PANINIAN_AVAILABLE:
+            try:
+                self.paninian = PaninianAnalyzer()
+                print("SanskritNLP: Paninian verb analyzer ready")
+            except Exception as e:
+                print(f"SanskritNLP: Paninian init failed: {e}")
+
+        self.noun_analyzer = None
+        if NOUN_AVAILABLE:
+            try:
+                self.noun_analyzer = NounAnalyzer()
+                print("SanskritNLP: Noun analyzer ready")
+            except Exception as e:
+                print(f"SanskritNLP: Noun init failed: {e}")
+
+        # ── AI config ───────────────────────────────────────────
         self.api_key = os.getenv("XAI_API_KEY")
         self.base_url = os.getenv("BASE_URL")
         self.ai_provider: str = "Local"
         self.ai_model: str = "None"
-        
+
         if self.api_key and isinstance(self.api_key, str):
-            api_key_str: str = self.api_key
-            if api_key_str.startswith("gsk_"):
-                # It's a Groq key
+            if self.api_key.startswith("gsk_"):
                 self.ai_provider = "Groq"
-                self.base_url = "https://api.groq.com/openai/v1" # Force Groq URL
+                self.base_url = "https://api.groq.com/openai/v1"
                 self.ai_model = "openai/gpt-oss-120b"
-                print(f"SanskritNLP: Detected Groq API Key. Setting provider to {self.ai_provider}...")
+                print("SanskritNLP: Groq API key detected (fallback only)")
             else:
-                # Assume it's an xAI (Grok) key
                 self.ai_provider = "Grok"
                 self.base_url = self.base_url or "https://api.x.ai/v1"
                 self.ai_model = "grok-beta"
-                print(f"SanskritNLP: Detected {self.ai_provider} API Key.")
-            
-            # Safe slice for printing
-            key_display = api_key_str[:8] if len(api_key_str) >= 8 else api_key_str
-            print(f"SanskritNLP: AI Engine initialized with key starting with {key_display}...")
+                print(f"SanskritNLP: {self.ai_provider} API key detected (fallback only)")
         else:
-            print("SanskritNLP: AI Engine key NOT found. Check your .env file.")
-    
+            print("SanskritNLP: No AI fallback key found")
+
+    # ==============================================================
+    # Tokenization
+    # ==============================================================
     def tokenize(self, text: str) -> List[str]:
-        """Tokenize Sanskrit text"""
-        # Simple tokenization by splitting on spaces and punctuation
         if NLTK_AVAILABLE:
             try:
-                # Basic cleanup for common punctuations often used as sentence ends
                 clean_text = text.replace('|', '।').replace('.', '।')
                 return word_tokenize(clean_text)
-            except:
+            except Exception:
                 pass
-        
-        # Fallback tokenization
         words = re.findall(r'[\u0900-\u097F]+|[.,!?;।|]', text)
         return [w for w in words if w.strip()]
-    
-    def analyze_text(self, text: str, mode: str = "Basic", use_ai: bool = False) -> Dict[str, Any]:
-        """Analyze Sanskrit text for grammar and syntax"""
-        
-        # If AI mode is requested and we have a key
+
+    # ==============================================================
+    # Word classification — four-layer pipeline
+    # ==============================================================
+    def _classify_word(self, word: str) -> Dict[str, Any]:
+        clean = re.sub(r'[.,!?;।|]$', '', word).strip()
+
+        # ── Layer 1: Dictionary ─────────────────────────────────
+        entry = None
+        if clean in self.vocabulary:
+            entry = self.vocabulary[clean]
+        else:
+            alt = clean
+            if clean.endswith('ं'):
+                alt = clean[:-1] + 'म्'
+            elif clean.endswith('म्'):
+                alt = clean[:-1] + 'ं'
+            if alt in self.vocabulary:
+                entry = self.vocabulary[alt]
+
+        if entry:
+            analysis = dict(entry)
+
+            if entry.get('pos') == 'verb' and self.paninian:
+                try:
+                    verb = self.paninian.analyze_verb(clean)
+                    if verb.get('is_verb'):
+                        analysis.update({
+                            'root': verb.get('root', ''),
+                            'root_slp1': verb.get('root_slp1', ''),
+                            'lakara': verb.get('tense', ''),
+                            'purusha': verb.get('person', ''),
+                            'vacana': verb.get('number', ''),
+                            'gana': verb.get('class', ''),
+                            'pada': verb.get('pada', ''),
+                            'suffix': verb.get('suffix', ''),
+                            'rules_applied': verb.get('rules_applied', []),
+                        })
+                except Exception:
+                    pass
+
+            return {
+                'word': word,
+                'pos': entry.get('pos', 'unknown'),
+                'source': 'dictionary',
+                'meaning': entry.get('meaning', ''),
+                'analysis': analysis,
+            }
+
+        # ── Layer 2: Noun analyzer ──────────────────────────────
+        if self.noun_analyzer:
+            try:
+                noun = self.noun_analyzer.analyze_best(clean)
+                if noun.get('pos') == 'noun' and noun.get('method') == 'declension_rule':
+                    stem = noun.get('stem', '')
+                    if len(stem) >= 2:
+                        return {
+                            'word': word,
+                            'pos': 'noun',
+                            'source': 'noun_rule',
+                            'meaning': 'unknown (not in dictionary)',
+                            'analysis': {
+                                'stem': stem,
+                                'gender': noun.get('gender', ''),
+                                'case': noun.get('case', ''),
+                                'number': noun.get('number', ''),
+                                'pattern': noun.get('pattern', ''),
+                            },
+                        }
+            except Exception:
+                pass
+
+        # ── Layer 3: Paninian verb analyzer ─────────────────────
+        if self.paninian:
+            try:
+                verb = self.paninian.analyze_verb(clean)
+                if verb.get('is_verb'):
+                    return {
+                        'word': word,
+                        'pos': 'verb',
+                        'source': 'paninian',
+                        'meaning': f"root: {verb.get('root', '?')}",
+                        'analysis': {
+                            'root': verb.get('root', ''),
+                            'root_slp1': verb.get('root_slp1', ''),
+                            'lakara': verb.get('tense', ''),
+                            'purusha': verb.get('person', ''),
+                            'vacana': verb.get('number', ''),
+                            'gana': verb.get('class', ''),
+                            'pada': verb.get('pada', ''),
+                            'suffix': verb.get('suffix', ''),
+                            'rules_applied': verb.get('rules_applied', []),
+                            'derivation_steps': len(verb.get('derivation', [])),
+                        },
+                    }
+            except Exception:
+                pass
+
+        # ── Layer 4: Unknown ────────────────────────────────────
+        return {
+            'word': word,
+            'pos': 'unknown',
+            'source': 'none',
+            'meaning': 'unknown',
+            'analysis': {'note': 'Not resolved by any layer'},
+        }
+
+    # ==============================================================
+    # Sentence-level helpers
+    # ==============================================================
+    @staticmethod
+    def _normalize_agreement_value(value: Any, aliases: Dict[str, str]) -> str:
+        if isinstance(value, (list, tuple)):
+            if len(value) != 1:
+                return ""
+            value = value[0]
+        if value is None:
+            return ""
+        return aliases.get(str(value).strip().lower(), "")
+
+    def _get_correct_verb_form(
+        self,
+        surface_form: str,
+        analysis: Dict[str, Any],
+        target_person: str,
+        target_number: str,
+    ) -> str:
+        """
+        Generate the correctly-inflected form of a verb for the given
+        person and number.
+
+        Resolution order:
+          1. Prakriya VerbFormGenerator — general, works for any root the
+             generator knows, in any tense the generator covers.
+          2. Local PARADIGM_TABLE — fast lookup for ~15 common roots.
+          3. Suffix-stripping fallback — last resort for regular लट् verbs.
+        """
+        person = str(target_person or '').lower()
+        number = str(target_number or '').lower()
+
+        if person not in ('first', 'second', 'third'):
+            return None
+        if number not in ('singular', 'dual', 'plural'):
+            return None
+
+        # ── 1. Try the Prakriya generator ────────────────────────
+        if self.paninian and hasattr(self.paninian, 'generate_verb_form'):
+            root_slp1 = analysis.get('root_slp1') or ''
+            lakara = analysis.get('lakara') or analysis.get('tense') or 'law'
+
+            person_slp1 = {
+                'first': 'uttama',
+                'second': 'maDyama',
+                'third': 'praTama',
+            }[person]
+            number_slp1 = {
+                'singular': 'eka',
+                'dual': 'dvi',
+                'plural': 'bahu',
+            }[number]
+
+            try:
+                generated = self.paninian.generate_verb_form(
+                    root_slp1, lakara, person_slp1, number_slp1
+                )
+                if generated:
+                    return generated
+            except Exception:
+                pass
+
+        # ── 2. Fall back to local paradigm table ─────────────────
+        root_slp1 = analysis.get('root_slp1') or ''
+        paradigm = PARADIGM_TABLE.get(root_slp1)
+        if paradigm:
+            found = paradigm.get(person, {}).get(number)
+            if found:
+                return found
+
+        # ── 3. Last resort — suffix stripping (present tense only) ─
+        lakara = str(analysis.get('lakara') or analysis.get('tense') or '').lower()
+        if lakara not in ('law', 'लट्'):
+            return None
+
+        endings = ['न्ति', 'ामः', 'ावः', 'आमि', 'थः', 'सि', 'ति', 'तः', 'थ',
+                   'न्ते', 'से', 'ते']
+        stem = surface_form
+        for ending in endings:
+            if surface_form.endswith(ending) and len(surface_form) > len(ending) + 1:
+                stem = surface_form[:-len(ending)]
+                break
+
+        if stem == surface_form:
+            return None
+
+        suffix = {
+            ('first',  'singular'): 'आमि',
+            ('first',  'dual'):     'आवः',
+            ('first',  'plural'):   'आमः',
+            ('second', 'singular'): 'सि',
+            ('second', 'dual'):     'थः',
+            ('second', 'plural'):   'थ',
+            ('third',  'singular'): 'ति',
+            ('third',  'dual'):     'तः',
+            ('third',  'plural'):   'न्ति',
+        }.get((person, number))
+
+        if suffix:
+            return stem + suffix
+        return None
+
+    def _replace_token(self, sentence: str, old: str, new: str) -> str:
+        """
+        Replace the first occurrence of the exact token `old` with `new`,
+        preserving trailing punctuation. Never touches substrings.
+        """
+        tokens = sentence.split()
+        result = []
+        replaced = False
+        for tok in tokens:
+            if replaced:
+                result.append(tok)
+                continue
+            m = re.match(r'^([\u0900-\u097F]+)([।॥.,!?;|]*)$', tok)
+            if not m:
+                result.append(tok)
+                continue
+            core, punct = m.group(1), m.group(2)
+            if core == old:
+                result.append(new + punct)
+                replaced = True
+            else:
+                result.append(tok)
+        return ' '.join(result)
+
+    def _fix_destination_accusative(self, sentence: str) -> str:
+        """
+        Replace only the exact nominative/bare form of विद्यालय or ग्रामः
+        with the accusative. Never touches विद्यालयम्, विद्यालयं, or any
+        word that merely contains the stem as a substring.
+        """
+        accusative_map = {
+            'विद्यालय':  'विद्यालयं',
+            'विद्यालयः': 'विद्यालयं',
+            'ग्राम':    'ग्रामम्',
+            'ग्रामः':   'ग्रामम्',
+        }
+        tokens = sentence.split()
+        fixed = []
+        for tok in tokens:
+            m = re.match(r'^([\u0900-\u097F]+)([।॥.,!?;|]*)$', tok)
+            if not m:
+                fixed.append(tok)
+                continue
+            core, punct = m.group(1), m.group(2)
+            if core in accusative_map:
+                fixed.append(accusative_map[core] + punct)
+            else:
+                fixed.append(tok)
+        return ' '.join(fixed)
+
+    def _run_checks(self, text: str, breakdown: List[Dict]) -> Tuple[List[str], List[Dict]]:
+        """
+        Run sentence-level checks.
+
+        Returns:
+            issues       : list of human-readable issue strings
+            corrections  : list of machine-applicable correction dicts
+        """
+        issues: List[str] = []
+        corrections: List[Dict[str, Any]] = []
+
+        # 1. Punctuation
+        if not text.strip().endswith(('।', '|', '.')):
+            issues.append("Sentence must end with a Purna Virama (।)")
+
+        # 2. Missing verb
+        has_verb = any(b['pos'] == 'verb' for b in breakdown)
+        if breakdown and not has_verb:
+            issues.append("Sentence has no verb.")
+
+        # 3. Subject-verb agreement
+        number_aliases = {
+            'eka': 'singular', 'dvi': 'dual', 'bahu': 'plural',
+            'singular': 'singular', 'dual': 'dual', 'plural': 'plural',
+            'एकवचन': 'singular', 'द्विवचन': 'dual', 'बहुवचन': 'plural',
+        }
+        person_aliases = {
+            'uttama': 'first', 'first': 'first',
+            'madhyama': 'second', 'madyama': 'second', 'second': 'second',
+            'pratama': 'third', 'prathama': 'third', 'third': 'third',
+        }
+
+        verb_entries = [b for b in breakdown if b['pos'] == 'verb']
+        subjects = [
+            b for b in breakdown
+            if b['pos'] in ('noun', 'pronoun')
+            and str(b['analysis'].get('case', '')).lower() == 'nominative'
+        ]
+        if verb_entries and subjects:
+            verb = verb_entries[0]['analysis']
+            verb_surface = verb_entries[0]['word']
+            subject = subjects[0]
+            subject_analysis = subject['analysis']
+
+            verb_number = self._normalize_agreement_value(
+                verb.get('vacana') or verb.get('number'), number_aliases
+            )
+            subject_number = self._normalize_agreement_value(
+                subject_analysis.get('number'), number_aliases
+            )
+            verb_person = self._normalize_agreement_value(
+                verb.get('purusha') or verb.get('person'), person_aliases
+            )
+            subject_person_value = subject_analysis.get('person')
+            if not subject_person_value and subject['pos'] == 'noun':
+                subject_person_value = 'third'
+            subject_person = self._normalize_agreement_value(
+                subject_person_value, person_aliases
+            )
+
+            number_mismatch = bool(subject_number and verb_number and subject_number != verb_number)
+            person_mismatch = bool(subject_person and verb_person and subject_person != verb_person)
+
+            if number_mismatch or person_mismatch:
+                expected = self._get_correct_verb_form(
+                    verb_surface,
+                    verb,
+                    subject_person or 'third',
+                    subject_number or 'singular',
+                )
+
+                if number_mismatch and person_mismatch:
+                    issues.append(
+                        f"Subject '{subject['word']}' ({subject_person} person, {subject_number}) "
+                        f"does not agree with verb '{verb_surface}' "
+                        f"({verb_person} person, {verb_number}) — check subject-verb agreement."
+                    )
+                elif number_mismatch:
+                    issues.append(
+                        f"Subject is {subject_number} but verb is {verb_number} "
+                        f"— check subject-verb agreement."
+                    )
+                else:
+                    issues.append(
+                        f"Subject is {subject_person} person but verb is {verb_person} person "
+                        f"— check subject-verb agreement."
+                    )
+
+                if expected and expected != verb_surface:
+                    corrections.append({
+                        'type': 'verb_agreement',
+                        'old': verb_surface,
+                        'new': expected,
+                    })
+
+        # 4. Destination → accusative
+        has_motion = False
+        for b in breakdown:
+            if b['pos'] != 'verb':
+                continue
+            a = b['analysis']
+            if str(a.get('root_slp1', '')).lower().startswith('gam'):
+                has_motion = True
+                break
+            if 'go' in str(a.get('meaning', '')).lower():
+                has_motion = True
+                break
+
+        has_first_person = any(
+            b['word'] in ('अहं', 'अहम्')
+            or b.get('analysis', {}).get('stem') == 'अहम्'
+            for b in breakdown
+        )
+
+        if has_first_person and has_motion:
+            for b in breakdown:
+                stem = b.get('analysis', {}).get('stem', '')
+                w_text = b.get('word', '')
+                # Match any noun whose form looks like a destination and is not already accusative
+                if stem in ('विद्यालय', 'ग्राम') or w_text.startswith(('विद्यालय', 'ग्राम')):
+                    if w_text in ('विद्यालयम्', 'विद्यालयं', 'ग्रामम्', 'ग्रामं'):
+                        continue
+                    case = str(b['analysis'].get('case', '')).lower()
+                    if case and case != 'accusative':
+                        issues.append(
+                            f"Destination '{w_text}' should be in Accusative Case (Dvitiya Vibhakti)."
+                        )
+                        break  # flag only once
+
+        return issues, corrections
+
+    # ==============================================================
+    # Correction builder
+    # ==============================================================
+    def _build_correction(
+        self,
+        original: str,
+        breakdown: List[Dict],
+        issues: List[str],
+        corrections: List[Dict] = None,
+    ) -> str:
+        corrected = original
+        corrections = corrections or []
+
+        # 1. Verb-agreement corrections (token-boundary safe)
+        for corr in corrections:
+            if corr.get('type') != 'verb_agreement':
+                continue
+            old = corr.get('old')
+            new = corr.get('new')
+            if not old or not new or old == new:
+                continue
+            corrected = self._replace_token(corrected, old, new)
+
+        # 2. Destination accusative fix (whole-token replacement)
+        if any('Dvitiya' in i or 'Accusative' in i for i in issues):
+            corrected = self._fix_destination_accusative(corrected)
+
+        # 3. Punctuation
+        corrected = corrected.strip()
+        if corrected.endswith('.'):
+            corrected = corrected[:-1] + "।"
+        elif not corrected.endswith(('।', '|')):
+            corrected += " ।"
+
+        # 4. Final cleanup — no whitespace before a danda
+        corrected = re.sub(r'\s+([।॥])', r'\1', corrected)
+
+        return corrected.strip()
+
+    # ==============================================================
+    # Main entry point
+    # ==============================================================
+    def analyze_text(self, text: str, mode: str = "Basic",
+                     use_ai: bool = False) -> Dict[str, Any]:
+
+        # Explicit AI mode → straight to AI
         if use_ai and self.api_key:
             return self.analyze_with_grok(text)
 
-        # Normalize common markers before tokenizing
-        normalized_text = text.replace('|', '।').replace('.', '।')
-        words = self.tokenize(normalized_text)
+        normalized = text.replace('|', '।').replace('.', '।')
+        words = self.tokenize(normalized)
         sanskrit_words = [w for w in words if re.match(r'[\u0900-\u097F]+', w)]
-        
-        # Breakdown with robust lookup
-        breakdown = []
-        for word in sanskrit_words:
-            # Clean word for lookup (remove trailing punctuation)
-            clean_word = re.sub(r'[.,!?;।|]$', '', word).strip()
-            
-            if clean_word in self.vocabulary:
-                breakdown.append({
-                    "word": word,
-                    "pos": self.vocabulary[clean_word]["pos"],
-                    "meaning": self.vocabulary[clean_word]["meaning"],
-                    "analysis": self.vocabulary[clean_word]
-                })
-            else:
-                # Try one more more time with common variations (e.g. anusvara vs ma-kara)
-                alt_word = clean_word
-                if clean_word.endswith('ं'):
-                    alt_word = clean_word[:-1] + 'म्'
-                elif clean_word.endswith('म्'):
-                    alt_word = clean_word[:-1] + 'ं'
-                
-                if alt_word in self.vocabulary:
-                    breakdown.append({
-                        "word": word,
-                        "pos": self.vocabulary[alt_word]["pos"],
-                        "meaning": self.vocabulary[alt_word]["meaning"],
-                        "analysis": self.vocabulary[alt_word]
-                    })
-                else:
-                    breakdown.append({
-                        "word": word,
-                        "pos": "unknown",
-                        "meaning": "unknown",
-                        "analysis": {"note": "Word not in local dictionary"}
-                    })
-        
-        # Generate issues
-        issues = []
+
         if len(sanskrit_words) < 1:
-             return {"error": "Please enter some text to analyze"}
-        
-        # Punctuation check: Sanskrit sentences should end with Purna Virama (।)
-        if not text.strip().endswith('।') and not text.strip().endswith('|') and not text.strip().endswith('.'):
-            issues.append("Sentence must end with a Purna Virama (।)")
-        
-        # Check specific grammar known to the lexicographer
-        has_aham = any(w in ["अहं", "अहम्"] for w in sanskrit_words)
-        has_gachhami = any(w == "गच्छामि" for w in sanskrit_words)
-        
-        if has_aham and has_gachhami:
-            target = next((w for w in sanskrit_words if w == "विद्यालय"), None)
-            if target:
-                issues.append(f"Destination '{target}' should be in Accusative Case (Dvitiya Vibhakti)")
-        
-        # Calculate score
+            return {"error": "Please enter some text to analyze"}
+
+        # Word-by-word classification
+        breakdown = [self._classify_word(w) for w in sanskrit_words]
+
+        # Sentence-level checks
+        issues, corrections = self._run_checks(text, breakdown)
+
+        # Score
         score = max(0, 100 - len(issues) * 15)
-        
-        # Generate live translation via Hugging Face Serverless
-        translation = self.translate_sanskrit_to_english(normalized_text)
-        
-        # Initialize default variables here to prevent UnboundLocalError
-        corrected_sentence = text
-        correction_summary = "No errors found."
-        
-        if score < 100:
-            # Smart mock correction for common student mistakes without altering standard structure
-            if "विद्यालय" in corrected_sentence and has_aham and has_gachhami and "विद्यालयं" not in corrected_sentence and "विद्यालयम्" not in corrected_sentence:
-                corrected_sentence = corrected_sentence.replace("विद्यालय", "विद्यालयं")
-            
-                # basic fallback for random nouns
-                for w in sanskrit_words:
-                    if self.vocabulary.get(w, {}).get("pos") == "noun" and not w.endswith("ः") and not w.endswith("म्") and not w.endswith("ं"):
-                        # cautious replace only if exact match word boundaries
-                        corrected_sentence = re.sub(fr'\b{w}\b', w + "ः", corrected_sentence)
 
-                correction_summary = "Corrected sentence structure and morphological markers."
+        # Keep grammar analysis independent of both translation pipelines.
+        # The field remains for backwards-compatible response shape.
+        translation = ""
 
-        # Final cleanup for punctuation: Ensure sentence ends with Purna Virama (।)
-        corrected_sentence = corrected_sentence.strip()
-        if corrected_sentence.endswith('.'):
-            corrected_sentence = corrected_sentence[:-1] + "।"
-        elif not corrected_sentence.endswith('।') and not corrected_sentence.endswith('|'):
-            corrected_sentence += " ।"
-        
+        # Corrected sentence
+        corrected = self._build_correction(text, breakdown, issues, corrections)
+        correction_summary = (
+            "Corrected sentence structure." if issues else "No errors found."
+        )
+
+        # Source counts
+        source_counts: Dict[str, int] = {}
+        for b in breakdown:
+            source_counts[b['source']] = source_counts.get(b['source'], 0) + 1
+
         return {
             "score": score,
             "issues": issues,
-            "corrected_sentence": corrected_sentence,
+            "corrected_sentence": corrected,
             "correction_summary": correction_summary,
             "breakdown": breakdown,
             "word_count": len(sanskrit_words),
             "translation": translation,
-            "analysis_mode": mode,
-            "ai_verified": False
+            "analysis_mode": "Grammar Check",
+            "ai_verified": False,
+            "source_counts": source_counts,
         }
 
+    # ==============================================================
+    # AI fallback
+    # ==============================================================
     def analyze_with_grok(self, text: str) -> Dict[str, Any]:
-        """Use xAI's Grok API for professional morphological and syntactic analysis"""
-        print(f"SanskritNLP: Starting AI Analysis for: {text} using {self.ai_provider}")
+        print(f"SanskritNLP: AI grammar analysis using {self.ai_provider}")
         try:
             prompt = f"""
-            Task: You are an expert Sanskrit grammarian and Pāṇini scholar. Analyze the following Sanskrit sentence: "{text}"
+            Task: You are an expert Sanskrit grammarian and Pāṇini scholar. Analyze: "{text}"
 
-            Instructions:
-            1. Separate the sentence into individual Sanskrit words (tokens).
-            2. For each word, provide morphological analysis (Vibhakti, Gender, Number, Tense, Person, Root).
-            3. CRITICAL: Check for missing case endings (e.g., "विद्यालय" when it should be "विद्यालयं" for objects) and subject-verb agreement (e.g., "छात्राः पठति" to "छात्राः पठन्ति"). 
-               - Purna Virama (।): Every Sanskrit sentence MUST end with '।'. If it is missing, or if they used a period (.), add "Missing or incorrect Purna Virama (।)" to the 'issues' list.
-            4. Provide an overall grammar score (0-100). Prioritize morphological and syntactic correctness.
-            5. EXTREMELY CRITICAL FOR "corrected_sentence": 
-               - You MUST NOT add any new words.
-               - You MUST NOT remove any user words.
-               - ONLY fix case endings (vibhakti) and verb endings (lakāra/puruṣa/vacana).
-               - Ensure the sentence ends with '।'. If the user used '.' or nothing, replace/add '।'.
-
-               Examples of EXACT corrections:
-               User: "अहं विद्यालय गच्छामि" -> Correct: "अहं विद्यालयं गच्छामि" (ONLY adding Anusvara)
-               User: "छात्राः पुस्तकम् पठति" -> Correct: "छात्राः पुस्तकम् पठन्ति" (ONLY fixing verb number to match plural subject)
-               BAD Correction (DO NOT DO THIS): "छात्राः पुस्तकम् पठति" -> "छात्राः पुस्तकं पठितुम् इच्छन्ति" (Added new words! Forbidden!)
-
-            6. "correction_summary" must explain the specific grammatical rule (e.g., "Karka-Siddhanta: Destination requires Dvitiya Vibhakti").
-
-            Output Format: STRICT JSON object with these fields:
+            Output STRICT JSON:
             {{
                 "score": int,
-                "issues": ["list of strings detailing specific grammatical errors"],
-                "corrected_sentence": "Properly corrected version in Devanagari",
-                "correction_summary": "Linguistic reason for changes (e.g., Why 'विद्यालय' became 'विद्यालयं')",
+                "issues": ["list of strings"],
+                "corrected_sentence": "corrected version in Devanagari",
+                "correction_summary": "reason",
                 "breakdown": [
-                    {{
-                        "word": "original",
-                        "pos": "POS Tag",
-                        "meaning": "English",
-                        "analysis": {{ "root": "...", "vibhakti": "...", "vachana": "...", "linga": "...", "details": "..." }}
-                    }}
+                    {{"word": "w", "pos": "POS", "meaning": "English", "analysis": {{}}}}
                 ],
-                "translation": "Full English translation"
             }}
             """
-
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
-
             payload = {
                 "model": self.ai_model,
                 "messages": [
-                    {"role": "system", "content": "You are an expert Sanskrit grammarian. Pay close attention to morphology, syntax, and punctuation. Every complete Sanskrit sentence must end with a Purna Virama (।)."},
-                    {"role": "user", "content": prompt}
+                    {"role": "system",
+                     "content": "You are an expert Sanskrit grammarian. Output valid JSON."},
+                    {"role": "user", "content": prompt},
                 ],
                 "response_format": {"type": "json_object"},
-                "temperature": 0.1
+                "temperature": 0.1,
             }
-
-            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=payload, timeout=30)
-            
-            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=payload, timeout=30)
-            
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers, json=payload, timeout=30,
+            )
             if response.status_code != 200:
-                # Updated print statement to reflect the actual provider
-                print(f"{self.ai_provider} API ERROR: {response.status_code} - {response.text}")
-                return self.analyze_text(text, mode=f"API Error {response.status_code}", use_ai=False)
-            
+                print(f"{self.ai_provider} API ERROR: {response.status_code}")
+                return self.analyze_text(text, mode="Local Fallback", use_ai=False)
+
             result = response.json()
             analysis_text = result['choices'][0]['message']['content']
-            
-            # Robust JSON extraction (in case AI wraps it in markdown blocks)
-            json_match = re.search(r'\{.*\}', analysis_text, re.DOTALL)
-            if json_match:
-                analysis_json = json.loads(json_match.group(0))
-            else:
-                analysis_json = json.loads(analysis_text)
-            
-            analysis_json["analysis_mode"] = f"{self.ai_provider} AI Engine"
-            analysis_json["ai_verified"] = True
+            m = re.search(r'\{.*\}', analysis_text, re.DOTALL)
+            analysis_json = json.loads(m.group(0)) if m else json.loads(analysis_text)
 
-            # Final cleanup: Ensure corrected_sentence properly ends with Purna Virama (।)
-            if "corrected_sentence" in analysis_json:
-                corrected = analysis_json["corrected_sentence"].strip()
-                if corrected.endswith('.'):
-                    corrected = corrected[:-1] + "।"
-                elif not corrected.endswith('।') and not corrected.endswith('|'):
-                    corrected += " ।"
-                analysis_json["corrected_sentence"] = corrected
-            
-            # Recalculate word count for AI results
-            words = self.tokenize(text)
-            s_words = [w for w in words if re.match(r'[\u0900-\u097F]+', w)]
-            analysis_json["word_count"] = len(s_words)
-            
-            print(f"SanskritNLP: Successfully analyzed with {self.ai_provider} AI")
+            if not isinstance(analysis_json, dict):
+                raise ValueError("AI analysis response must be a JSON object")
+
+            normalized = text.replace('|', '।').replace('.', '।')
+            sanskrit_words = [
+                word for word in self.tokenize(normalized)
+                if re.match(r'[\u0900-\u097F]+', word)
+            ]
+            issues = analysis_json.setdefault("issues", [])
+            breakdown = analysis_json.setdefault("breakdown", [])
+            if not isinstance(issues, list) or not isinstance(breakdown, list):
+                raise ValueError("AI analysis issues and breakdown must be lists")
+
+            analysis_json.setdefault("score", max(0, 100 - len(issues) * 15))
+            analysis_json.setdefault(
+                "corrected_sentence",
+                self._build_correction(text, breakdown, issues, []),
+            )
+            analysis_json.setdefault(
+                "correction_summary",
+                "Corrected sentence structure." if issues else "No errors found.",
+            )
+            analysis_json.setdefault("word_count", len(sanskrit_words))
+            analysis_json["translation"] = ""
+            source_counts: Dict[str, int] = {}
+            for item in breakdown:
+                if isinstance(item, dict) and item.get("source"):
+                    source = str(item["source"])
+                    source_counts[source] = source_counts.get(source, 0) + 1
+            analysis_json.setdefault("source_counts", source_counts)
+            analysis_json["analysis_mode"] = "AI Scan"
+            analysis_json["ai_verified"] = True
             return analysis_json
 
         except Exception as e:
-            print(f"CRITICAL API Error: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            # Fallback to local analysis if AI fails
+            print(f"AI Error: {e}")
             return self.analyze_text(text, mode="AI Fallback", use_ai=False)
-    
+
+    # ==============================================================
+    # Translation
+    # ==============================================================
     def mock_translate(self, text: str) -> str:
-        """Mock translation for demo"""
         translations = {
             "रामः वनं गच्छति।": "Rama goes to the forest.",
             "सीता अस्ति।": "Sita is.",
             "सुतः पुस्तकं पठति।": "The son reads a book.",
             "बालकः फलं खादति।": "The boy eats fruit.",
         }
-        
         if text in translations:
             return translations[text]
-        
-        # Generic translation
-        words = text.split()
-        if words:
-            return f"Translation of '{words[0]}...' would appear here"
-        
         return "Translation unavailable"
 
     def translate_sanskrit_to_english(self, text: str) -> str:
-        """Translate Sanskrit text to English using Hugging Face Serverless API"""
-        hf_token = os.getenv("HUGGINGFACE_TOKEN")
-        if not hf_token:
-            return "Translation unavailable: HUGGINGFACE_TOKEN not found."
-
-        # The 2026 updated HF Serverless Router URL
-        API_URL = "https://router.huggingface.co/hf-inference/models/ai4bharat/indictrans2-indic-en-dist-200M"
-        
-        headers = {
-            "Authorization": f"Bearer {hf_token}",
-            "Content-Type": "application/json"
-        }
-        
-        # IndicTrans2 uses specific language tags: 'san_Deva' for Sanskrit, 'eng_Latn' for English
-        payload = {
-            "inputs": text,
-            "parameters": {
-                "src_lang": "san_Deva", 
-                "tgt_lang": "eng_Latn"
-            }
-        }
-        
         try:
-            response = requests.post(API_URL, headers=headers, json=payload, timeout=15)
-            
-            if response.status_code == 200:
-                result = response.json()
-                # Extract the translated string from the HF response format
-                if isinstance(result, list) and len(result) > 0 and 'translation_text' in result[0]:
-                    return result[0]['translation_text']
-                elif 'generated_text' in result: # Fallback format
-                    return result['generated_text']
-            elif response.status_code == 503:
-                # 503 means the model is "cold" and loading into memory. 
-                estimated_time = response.json().get('estimated_time', 20)
-                return f"Model is warming up. Please try again in {int(estimated_time)} seconds."
-            else:
-                print(f"HF Translation Error: {response.status_code} - {response.text}")
-                return "Translation failed."
-                
+            from deep_translator import GoogleTranslator
+            translator = GoogleTranslator(source='auto', target='en')
+            translation = translator.translate(text)
+            if translation and translation != text:
+                return translation
+            return self.mock_translate(text)
         except Exception as e:
-            print(f"HF Request Exception: {str(e)}")
-            return "Translation request timed out."
-            
-        return "Translation unavailable"
-    
+            print(f"Translation error: {e}")
+            return self.mock_translate(text)
+
+    # ==============================================================
+    # Legacy helpers (kept for compatibility)
+    # ==============================================================
     def check_grammar(self, text: str) -> List[Dict]:
-        """Check grammar against rules"""
         issues = []
-        
         for rule in self.grammar_rules:
             if not re.search(rule["pattern"], text.replace(" ", "")):
                 issues.append({
                     "rule": rule["rule"],
                     "description": rule["description"],
-                    "suggestion": f"Check {rule['rule'].lower()}"
+                    "suggestion": f"Check {rule['rule'].lower()}",
                 })
-        
         return issues
-    
+
     def get_word_details(self, word: str) -> Dict:
-        """Get detailed analysis of a Sanskrit word"""
         if word in self.vocabulary:
             return self.vocabulary[word]
-        
-        # Generate mock analysis for unknown words
-        return {
-            "pos": random.choice(["noun", "verb", "adjective"]),
-            "meaning": "Meaning not in database",
-            "note": "This word needs to be added to vocabulary"
-        }
+        return {"pos": "unknown", "meaning": "Not in database"}

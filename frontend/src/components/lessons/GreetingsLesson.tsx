@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '@/lib/api';
+import AudioPronounceButton from '@/components/AudioPronounceButton';
 
 interface Greeting {
     id: string;
@@ -188,6 +189,7 @@ export default function GreetingsLesson({ onBack }: { onBack: () => void }) {
                                     >
                                         {phrase.sanskrit}
                                     </motion.div>
+                                    <AudioPronounceButton text={phrase.sanskrit} size={20} title={`Pronounce ${phrase.sanskrit}`} />
                                     
                                     <div style={{ marginBottom: '4px', fontSize: '1.6rem', fontWeight: 800, color: 'var(--text-main)' }}>
                                         {phrase.english}

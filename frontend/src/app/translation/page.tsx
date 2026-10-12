@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import Sidebar from "@/components/Sidebar";
 import { useSanskritTransliteration } from "@/hooks/useSanskritTransliteration";
 import WordSuggestions from "@/components/WordSuggestions";
+import AudioPronounceButton from "@/components/AudioPronounceButton";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   Languages, 
@@ -238,6 +239,7 @@ export default function Translation() {
                                 <>
                                   <div className="flex items-center gap-6 mb-6">
                                     <h2 className="devanagari" style={{ fontSize: '4.5rem', lineHeight: 1, color: 'var(--primary)' }}>{res.devanagari}</h2>
+                                    <AudioPronounceButton text={res.devanagari || ''} size={24} title="Pronounce Sanskrit translation" />
                                     <motion.button whileHover={{ scale: 1.2 }} style={{ background: 'none', border: 'none', color: 'var(--text-light)', cursor: 'pointer' }}>
                                       <Volume2 size={24} />
                                     </motion.button>
@@ -266,6 +268,7 @@ export default function Translation() {
                                   </h2>
                                   <div className="flex items-center gap-4 mb-32">
                                      <span className="devanagari" style={{ fontSize: '2rem', color: 'var(--primary)' }}>{res.devanagari}</span>
+                                     <AudioPronounceButton text={res.devanagari || ''} size={20} title="Pronounce Sanskrit text" />
                                      <span style={{ color: 'var(--text-light)', fontSize: '1.2rem' }}>— {res.sanskrit}</span>
                                   </div>
                                   

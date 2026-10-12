@@ -53,7 +53,7 @@ export default function Progress() {
 
   const stats = [
     { label: "Current Rank", value: user.level.toUpperCase(), desc: "Moving to Vidvan", icon: Medal, color: "var(--primary)" },
-    { label: "Daily Streak", value: `${progress?.streak_days || 0} days`, desc: "Consistency build grit", icon: Target, color: "#3498db" },
+    { label: "Daily Streak", value: `${progress?.current_streak ?? progress?.streak_days ?? 0} days`, desc: "Consistency build grit", icon: Target, color: "#3498db" },
     { label: "Accuracy", value: `${progress?.avg_score || 0}%`, desc: "Recitation precision", icon: Zap, color: "var(--accent)" },
   ];
 

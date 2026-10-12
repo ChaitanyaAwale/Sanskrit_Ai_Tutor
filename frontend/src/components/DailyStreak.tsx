@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { Flame, Star, CheckCircle, AlertCircle, XCircle, Trophy, Sparkles, ArrowRight, RotateCcw } from 'lucide-react';
 import { api } from '@/lib/api';
+import AudioPronounceButton from '@/components/AudioPronounceButton';
 
 export default function DailyStreak() {
     const [questions, setQuestions] = useState<any[]>([]);
@@ -86,6 +87,17 @@ export default function DailyStreak() {
             setStreak(newStreak);
             localStorage.setItem('sanskrit_streak', newStreak.toString());
             localStorage.setItem('sanskrit_last_played', currentDayStr);
+
+            try {
+                const user = JSON.parse(localStorage.getItem('user') || 'null');
+                if (user?.username) {
+                    void api.user.recordDailyActivity(user.username, 100).catch(() => {
+                        // Local streak behavior remains available if the API is offline.
+                    });
+                }
+            } catch {
+                // Ignore malformed local profile data; the local streak still works.
+            }
             
             const nextDay = Math.min(currentQ.day + 1, questions.length);
             localStorage.setItem('sanskrit_current_day', nextDay.toString());
@@ -302,7 +314,10 @@ export default function DailyStreak() {
                         </div>
 
                         <div className="quest-body">
-                            <h2 className="quest-question">{questions[currentQuestionIndex]?.question}</h2>
+                            <div className="flex items-center justify-center gap-2">
+                                <h2 className="quest-question">{questions[currentQuestionIndex]?.question}</h2>
+                                <AudioPronounceButton text={questions[currentQuestionIndex]?.question || ''} size={20} />
+                            </div>
 
                             <div className="options-grid">
                                 {questions[currentQuestionIndex]?.options.map((opt: string, i: number) => {

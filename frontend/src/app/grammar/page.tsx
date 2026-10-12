@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import Sidebar from "@/components/Sidebar";
 import SanskritInput from "@/components/SanskritInput";
+import AudioPronounceButton from "@/components/AudioPronounceButton";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ShieldCheck,
@@ -45,7 +46,7 @@ export default function Grammar() {
     setLoading(true);
     setAnalysis(null);
     try {
-      const res = await api.tools.checkGrammar(inputText, useAi);
+      const res = await api.tools.checkGrammar(inputText, useAi, user?.username);
       setAnalysis(res);
     } catch (err) {
       console.error(err);
@@ -247,6 +248,7 @@ export default function Grammar() {
                                 <div className="devanagari" style={{ fontSize: '1.8rem', color: 'var(--text-main)' }}>
                                   {analysis.corrected_sentence}
                                 </div>
+                                <AudioPronounceButton text={analysis.corrected_sentence} size={20} title="Listen to suggested correction" />
                                 <button
                                   onClick={() => setInputText(analysis.corrected_sentence)}
                                   style={{
@@ -290,6 +292,7 @@ export default function Grammar() {
                             <div className="flex justify-between items-start mb-4">
                               <div>
                                 <div className="devanagari" style={{ fontSize: '1.6rem', color: 'var(--primary)', lineHeight: 1 }}>{item.word}</div>
+                                <AudioPronounceButton text={item.word || ''} size={16} title={`Pronounce ${item.word || 'Sanskrit word'}`} />
                                 <div style={{ fontWeight: '700', fontSize: '1rem', marginTop: '6px' }}>{item.meaning}</div>
                               </div>
                               <span style={{ padding: '4px 10px', background: 'rgba(var(--primary-rgb), 0.08)', borderRadius: '8px', fontSize: '0.65rem', fontWeight: '900', color: 'var(--primary)', textTransform: 'uppercase' }}>

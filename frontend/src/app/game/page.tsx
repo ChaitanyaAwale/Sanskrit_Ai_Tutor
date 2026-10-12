@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import Sidebar from "@/components/Sidebar";
+import AudioPronounceButton from "@/components/AudioPronounceButton";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Dice5,
@@ -922,6 +923,9 @@ export default function GamePage() {
                       >
                         {currentWord?.sanskrit}
                       </h2>
+                      {currentWord?.sanskrit && (
+                        <AudioPronounceButton text={currentWord.sanskrit} size={26} title="Pronounce this Sanskrit word" />
+                      )}
                     </motion.div>
 
                     <AnimatePresence>

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import Sidebar from "@/components/Sidebar";
 import DailyStreak from "@/components/DailyStreak";
+import AudioPronounceButton from "@/components/AudioPronounceButton";
 import { motion } from "framer-motion";
 import {
   Trophy,
@@ -183,6 +184,7 @@ export default function Dashboard() {
           >
             {dailyQuote.sanskrit}
           </motion.div>
+          <AudioPronounceButton text={dailyQuote.sanskrit} size={20} title="Listen to Sanskrit quote" />
           <div style={{ height: '24px', width: '1px', background: 'var(--border-soft)' }} />
           <div>
             <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-dim)', fontStyle: 'italic' }}>

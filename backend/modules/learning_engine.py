@@ -22,22 +22,22 @@ class AdaptiveLearning:
                     if content:  # Check if file is not empty
                         data = json.loads(content)
                         if 'lessons' in data and data['lessons']:
-                            print(f"✅ Loaded {len(data['lessons'])} lessons from file")
+                            print(f"Loaded {len(data['lessons'])} lessons from file")
                             return data['lessons']
                         else:
-                            print("⚠️ Lessons file has no lessons data")
+                            print("Lessons file has no lessons data")
                     else:
-                        print("⚠️ Lessons file is empty")
+                        print("Lessons file is empty")
             else:
-                print(f"⚠️ Lessons file not found at {self.lessons_file}")
+                print(f"Lessons file not found at {self.lessons_file}")
         
         except json.JSONDecodeError as e:
-            print(f"❌ Error parsing lessons JSON: {e}")
+            print(f"Error parsing lessons JSON: {e}")
         except Exception as e:
-            print(f"❌ Unexpected error loading lessons: {e}")
+            print(f"Unexpected error loading lessons: {e}")
         
         # Return default lessons if anything fails
-        print("📚 Using default lessons")
+        print("Using default lessons")
         return self.get_default_lessons()
     
     def get_default_lessons(self):

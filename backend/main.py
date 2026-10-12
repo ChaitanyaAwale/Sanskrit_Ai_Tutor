@@ -1,9 +1,21 @@
 from fastapi import FastAPI, HTTPException, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Any
+import sys
 import os
 import json
 from pydantic import BaseModel
+
+# Keep Unicode status messages from optional modules from aborting startup in
+# Windows terminals that use a legacy code page.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+
+# Allow `uvicorn backend.main:app` from the project root as well as running
+# `uvicorn main:app` from backend/.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 # Import existing modules
 from modules.database import MockDB
@@ -13,6 +25,8 @@ from modules.auth import Authenticator
 from modules.translator import SanskritTranslator
 from modules.snake_ladder import start_new_game, process_turn
 from modules.odd_one_out import get_random_question, check_answer
+from modules.skill_mapper import SkillMapper
+from modules.sqlite_repository import SQLiteRepository
 
 app = FastAPI(title="SanskritAI API")
 
@@ -32,7 +46,6 @@ app.add_middleware(
 )
 
 # Base directory for data
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 
 # Initialize modules
@@ -44,6 +57,60 @@ translator = SanskritTranslator(
     csv_path=os.path.join(DATA_DIR, 'sanskrit_words.csv'),
     sentences_path=os.path.join(DATA_DIR, 'sanskrit_sentences.json')
 )
+skill_mapper = SkillMapper()
+learning_db = SQLiteRepository(
+    database_path=os.getenv(
+        "SQLITE_DB_PATH", os.path.join(DATA_DIR, "sanskrit_ai.sqlite3")
+    )
+)
+learning_db.initialize()
+
+
+def _ensure_learning_user(username: str) -> int:
+    """Create a learning-only profile; authentication data stays in users.json."""
+    profile = getattr(auth, "users", {}).get(username, {})
+    if not isinstance(profile, dict):
+        profile = {}
+    return learning_db.ensure_user(
+        username,
+        role=str(profile.get("role", "student")),
+        level=str(profile.get("level", "beginner")),
+        created_at=profile.get("created_at"),
+    )
+
+
+def _migrate_legacy_bkt_snapshot() -> None:
+    """Seed SQLite from legacy BKT JSON without editing or replacing that file."""
+    source = os.path.join(DATA_DIR, "bkt_progress.json")
+    if not os.path.exists(source):
+        return
+    try:
+        with open(source, "r", encoding="utf-8") as progress_file:
+            snapshot = json.load(progress_file)
+        if not isinstance(snapshot, dict):
+            return
+        for username, user_state in snapshot.items():
+            if not isinstance(user_state, dict):
+                continue
+            user_id = _ensure_learning_user(str(username))
+            skills = user_state.get("skills", {})
+            if not isinstance(skills, dict):
+                continue
+            for skill_id, mastery in skills.items():
+                if not isinstance(mastery, dict):
+                    continue
+                learning_db.import_skill_mastery(
+                    user_id,
+                    str(skill_id),
+                    mastery.get("mastery", 0.0),
+                    mastery.get("attempts", 0),
+                    mastery.get("correct", 0),
+                )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        print(f"SQLite progress migration skipped: {type(exc).__name__}")
+
+
+_migrate_legacy_bkt_snapshot()
 
 # Pydantic models for request/response
 class LoginRequest(BaseModel):
@@ -63,6 +130,18 @@ class TranslateRequest(BaseModel):
 class GrammarRequest(BaseModel):
     text: str
     use_ai: bool = False
+    username: Optional[str] = None
+
+
+class QuizSubmissionRequest(BaseModel):
+    lesson_id: str
+    answers: Dict[str, int]
+    quiz_id: str = "lesson_quiz"
+
+
+class DailyActivityRequest(BaseModel):
+    activity_date: Optional[str] = None
+    score_percent: Optional[float] = None
 
 class GameTurnRequest(BaseModel):
     current_position: int = 0
@@ -237,11 +316,127 @@ def get_daily_questions():
 
 @app.get("/progress/{username}")
 def get_progress(username: str):
-    return db.get_user_progress(username)
+    progress = db.get_user_progress(username)
+    user_id = _ensure_learning_user(username)
+    completed_ids = list(learning_db.get_completed_lesson_ids(user_id))
+    streak = learning_db.get_streak_summary(user_id)
+    # Keep the legacy fields and add persisted completion/streak details.
+    return {
+        **progress,
+        "completed_lesson_ids": completed_ids,
+        "lessons_completed": max(int(progress.get("completed", 0)), len(completed_ids)),
+        "current_streak": streak["current_streak"],
+        "longest_streak": streak["longest_streak"],
+    }
 
 @app.get("/activities/{username}")
 def get_activities(username: str):
-    return db.get_recent_activities(username)
+    user_id = _ensure_learning_user(username)
+    recent = learning_db.get_dashboard_summary(user_id, learning_engine.lessons)["recent_activity"]
+    if not recent:
+        return db.get_recent_activities(username)
+    activity_names = {"lesson": "Completed lesson", "quiz": "Quiz attempt", "grammar": "Grammar check"}
+    return [
+        {
+            "action": activity_names.get(item["type"], "Learning activity"),
+            "details": item["detail"],
+            "timestamp": item["occurred_at"],
+            "score": f"{item['score_percent']}%" if item["score_percent"] is not None else "",
+        }
+        for item in recent
+    ]
+
+
+@app.get("/dashboard/{username}")
+def get_persisted_dashboard(username: str):
+    user_id = _ensure_learning_user(username)
+    summary = learning_db.get_dashboard_summary(user_id, learning_engine.lessons)
+    mastery = learning_db.get_skill_mastery(user_id)
+    summary["mastery"] = {
+        "average": round(sum(item["mastery"] for item in mastery.values()) / len(mastery), 4) if mastery else 0.0,
+        "mastered_skills": sum(1 for item in mastery.values() if item["mastery"] >= 0.7),
+        "skills": mastery,
+    }
+    return summary
+
+
+@app.get("/streak/{username}")
+def get_learning_streak(username: str):
+    return learning_db.get_streak_summary(_ensure_learning_user(username))
+
+
+@app.post("/streak/{username}/activity")
+def record_daily_activity(username: str, req: DailyActivityRequest):
+    return learning_db.record_learning_day(
+        _ensure_learning_user(username),
+        activity_date=req.activity_date,
+        source="daily_streak",
+        challenge_id="daily_questions",
+        completed=1,
+        score_percent=req.score_percent,
+    )
+
+
+@app.post("/progress/{username}/complete")
+def complete_lesson(username: str, payload: Dict[str, Any] = Body(...)):
+    lesson_id = payload.get("lesson_id")
+    if not isinstance(lesson_id, (int, str)) or not str(lesson_id).strip():
+        raise HTTPException(status_code=400, detail="lesson_id is required")
+    lesson = next((item for item in learning_engine.lessons if str(item.get("id")) == str(lesson_id)), None)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    user_id = _ensure_learning_user(username)
+    completion = learning_db.complete_lesson(user_id, str(lesson_id))
+    if completion["created"]:
+        db.update_progress(username, int(lesson_id), "completed")
+        learning_db.record_learning_day(user_id, source="lesson")
+    return {
+        "success": True,
+        "username": username,
+        "lesson_id": str(lesson_id),
+        "completed": completion["completed_count"],
+        "message": "Lesson marked as complete",
+    }
+
+
+@app.post("/progress/{username}/quiz")
+def submit_lesson_quiz(username: str, req: QuizSubmissionRequest):
+    lesson = next((item for item in learning_engine.lessons if str(item.get("id")) == str(req.lesson_id)), None)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    if not req.quiz_id or len(req.quiz_id) > 128:
+        raise HTTPException(status_code=400, detail="quiz_id is invalid")
+    questions = [
+        question
+        for section in lesson.get("sections", []) if section.get("type") == "quiz"
+        for question in section.get("questions", [])
+    ]
+    if not questions:
+        raise HTTPException(status_code=400, detail="Lesson has no quiz")
+    expected_ids = {str(question.get("id")) for question in questions}
+    if set(req.answers) != expected_ids:
+        raise HTTPException(status_code=400, detail="All quiz answers are required")
+    correct_answers = sum(
+        req.answers[str(question["id"])] == question.get("correct") for question in questions
+    )
+    total_questions = len(questions)
+    score = round(correct_answers * 100 / total_questions, 2)
+    user_id = _ensure_learning_user(username)
+    attempt = learning_db.record_quiz_attempt(
+        user_id, str(req.lesson_id), req.quiz_id, score, correct_answers, total_questions
+    )
+    mastery = None
+    difficulty = int(lesson.get("difficulty", 3))
+    for question in questions:
+        is_correct = req.answers[str(question["id"])] == question.get("correct")
+        mastery = learning_db.record_bkt_observation(user_id, req.lesson_id, is_correct, difficulty)
+        db.record_bkt_attempt(username, int(req.lesson_id), is_correct, difficulty)
+    learning_db.record_learning_day(user_id, source="quiz", score_percent=score)
+    if correct_answers == total_questions:
+        completion = learning_db.complete_lesson(user_id, str(req.lesson_id), source="quiz")
+        if completion["created"]:
+            db.update_progress(username, int(req.lesson_id), "completed")
+    return {**attempt, "mastery": mastery}
 
 @app.post("/translate")
 def translate_text(req: TranslateRequest):
@@ -257,21 +452,110 @@ def translate_text(req: TranslateRequest):
 @app.post("/grammar/check")
 def check_grammar(req: GrammarRequest):
     analysis = nlp.analyze_text(req.text, use_ai=req.use_ai)
-    return analysis
+    if "error" in analysis:
+        return analysis
+
+    bkt_updates = []
+    skipped_issues = []
+    seen_skill_ids = set()
+
+    # Only persist grammar outcomes when the caller identifies the learner.
+    # This keeps old clients compatible and avoids assigning attempts to a
+    # shared demo account by default.
+    if req.username:
+        learning_user_id = _ensure_learning_user(req.username)
+        for issue in analysis.get("issues", []):
+            raw_error_type = (
+                issue.get("error_type", "") if isinstance(issue, dict)
+                else str(issue)
+            )
+            skill_info = skill_mapper.map_error_to_skill(raw_error_type)
+            if skill_info is None:
+                skipped_issues.append({
+                    "raw_error_type": raw_error_type,
+                    "reason": "unmapped error type; no BKT update",
+                })
+                continue
+
+            skill_id = skill_info.get("skill_id")
+            if skill_id is None or skill_id in seen_skill_ids:
+                continue
+            seen_skill_ids.add(skill_id)
+
+            lesson = next(
+                (item for item in learning_engine.lessons if item.get("id") == skill_id),
+                None,
+            )
+            difficulty = (lesson or {}).get("difficulty", skill_info.get("difficulty", 3))
+            result = db.record_bkt_attempt(
+                req.username, skill_id, is_correct=False, difficulty=difficulty
+            )
+            learning_db.record_bkt_observation(
+                learning_user_id, skill_id, is_correct=False, difficulty=difficulty
+            )
+            bkt_updates.append({
+                "error_type": skill_mapper.normalize_error_type(raw_error_type),
+                "skill_id": skill_id,
+                "skill_name": skill_info.get("skill_name"),
+                "mastery": result["mastery"],
+                "attempts": result["attempts"],
+            })
+
+        learning_db.record_grammar_activity(
+            user_id=learning_user_id,
+            input_text=req.text,
+            score_percent=float(analysis.get("score", 0)),
+            analysis_mode=str(analysis.get("analysis_mode", "Grammar Check")),
+            word_count=int(analysis.get("word_count", 0)),
+            issue_count=len(analysis.get("issues", [])),
+            result=analysis,
+        )
+        learning_db.record_learning_day(learning_user_id, source="grammar")
+
+    recommendation = (
+        db.get_bkt_recommendation(req.username)
+        if req.username and bkt_updates else None
+    )
+    return {
+        **analysis,
+        "bkt_updates": bkt_updates,
+        "skipped_issues": skipped_issues,
+        "recommendation": recommendation,
+    }
 
 @app.get("/dashboard/stats/{username}")
 def get_dashboard_stats(username: str):
     progress = db.get_user_progress(username)
-    activities = db.get_recent_activities(username)
+    user_id = _ensure_learning_user(username)
+    summary = learning_db.get_dashboard_summary(user_id, learning_engine.lessons)
+    activities = summary["recent_activity"] or db.get_recent_activities(username)
     stats = translator.get_database_stats()
-    
     return {
         "words_learned": len(activities),
-        "lessons_completed": progress.get('completed', 0),
+        "lessons_completed": max(progress.get('completed', 0), summary["statistics"]["lessons_completed"]),
         "current_level": progress.get('level', 'beginner'),
         "points": progress.get('points', 0),
-        "db_stats": stats
+        "db_stats": stats,
+        "learning_stats": summary["statistics"],
     }
+
+
+@app.get("/grammar/history/{username}")
+def get_grammar_history(username: str, limit: int = 20):
+    rows = learning_db.list_grammar_activities(_ensure_learning_user(username), limit)
+    return [
+        {
+            "id": row["id"],
+            "input_text": row["input_text"],
+            "score_percent": row["score_percent"],
+            "analysis_mode": row["analysis_mode"],
+            "word_count": row["word_count"],
+            "issue_count": row["issue_count"],
+            "result": json.loads(row["result_json"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 # ─── Suggestions Endpoint (Local DB + Groq Fallback) ──────────────────────────
 @app.get("/suggestions")
@@ -397,9 +681,26 @@ def lesson_attempt(req: LessonAttemptRequest):
     
     difficulty = lesson.get('difficulty', 3)
     result = db.record_bkt_attempt(req.username, req.lesson_id, req.correct, difficulty)
+    user_id = _ensure_learning_user(req.username)
+    learning_db.record_bkt_observation(user_id, req.lesson_id, req.correct, difficulty)
+    learning_db.record_quiz_attempt(
+        user_id=user_id,
+        lesson_id=str(req.lesson_id),
+        quiz_id="lesson_attempt",
+        score_percent=100.0 if req.correct else 0.0,
+        correct_answers=1 if req.correct else 0,
+        total_questions=1,
+    )
+    learning_db.record_learning_day(user_id, source="lesson_attempt", score_percent=100.0 if req.correct else 0.0)
+    if req.correct:
+        completion = learning_db.complete_lesson(user_id, str(req.lesson_id), source="lesson_attempt")
+        if completion["created"]:
+            db.update_progress(req.username, req.lesson_id, "completed")
+    else:
+        db.update_progress(req.username, req.lesson_id, "started")
     
     # Also update traditional progress
-    db.update_progress(req.username, req.lesson_id, 'completed' if req.correct else 'started')
+    # The legacy JSON progress file remains updated for existing consumers.
     
     # Get next recommendation
     recommended = db.get_bkt_recommendation(req.username)

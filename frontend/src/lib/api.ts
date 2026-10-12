@@ -79,12 +79,30 @@ export const api = {
     getRecommendation: (username: string) => apiRequest(`/recommendation/${username}`),
     getBKTSummary: (username: string) => apiRequest(`/bkt/summary/${username}`),
     getBKTMastery: (username: string) => apiRequest(`/bkt/mastery/${username}`),
+    getPersistentDashboard: (username: string) => apiRequest(`/dashboard/${username}`),
+    getStreak: (username: string) => apiRequest(`/streak/${username}`),
+    getGrammarHistory: (username: string, limit = 20) => apiRequest(`/grammar/history/${username}?limit=${limit}`),
+    recordDailyActivity: (username: string, score_percent = 100) =>
+      apiRequest(`/streak/${username}/activity`, {
+        method: 'POST',
+        body: JSON.stringify({ score_percent }),
+      }),
+    completeLesson: (username: string, lesson_id: number | string) =>
+      apiRequest(`/progress/${username}/complete`, {
+        method: 'POST',
+        body: JSON.stringify({ lesson_id }),
+      }),
+    submitQuiz: (username: string, data: { lesson_id: string; answers: Record<string, number>; quiz_id?: string }) =>
+      apiRequest(`/progress/${username}/quiz`, { method: 'POST', body: JSON.stringify(data) }),
   },
   tools: {
     translate: (data: { text: string; direction: string; use_api?: boolean }) => 
       apiRequest('/translate', { method: 'POST', body: JSON.stringify(data) }),
-    checkGrammar: (text: string, use_ai: boolean = false) => 
-      apiRequest('/grammar/check', { method: 'POST', body: JSON.stringify({ text, use_ai }) }),
+    checkGrammar: (text: string, use_ai: boolean = false, username?: string) =>
+      apiRequest('/grammar/check', {
+        method: 'POST',
+        body: JSON.stringify({ text, use_ai, ...(username ? { username } : {}) }),
+      }),
   },
   game: {
     start: () => apiRequest('/game/start'),

@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '@/lib/api';
+import AudioPronounceButton from '@/components/AudioPronounceButton';
 import SanskritInput from '@/components/SanskritInput';
 
 interface IntroOption {
@@ -142,6 +143,7 @@ export default function SelfIntroLesson({ onBack }: { onBack: () => void }) {
                                     <div className="devanagari" style={{ fontSize: '2.5rem', color: 'var(--text-main)', lineHeight: '1.4' }}>
                                         {finalSanskrit}
                                     </div>
+                                    <AudioPronounceButton text={finalSanskrit} size={20} title="Listen to your Sanskrit introduction" />
                                     <div style={{ fontSize: '1.2rem', color: 'var(--text-light)', fontStyle: 'italic', marginTop: '4px' }}>
                                         {finalTranslit}
                                     </div>

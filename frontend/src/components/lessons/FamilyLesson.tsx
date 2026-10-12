@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '@/lib/api';
+import AudioPronounceButton from '@/components/AudioPronounceButton';
 
 interface FamilyMember {
     id: string;
@@ -200,6 +201,7 @@ export default function FamilyLesson({ onBack }: { onBack: () => void }) {
                             }}
                         >
                             <span className="devanagari" style={{ fontSize: '1.3rem' }}>{quizTarget.sanskrit}</span>
+                            <AudioPronounceButton text={quizTarget.sanskrit} size={16} title={`Pronounce ${quizTarget.sanskrit}`} />
                             <span style={{ marginLeft: '8px', opacity: 0.8, fontSize: '0.85rem' }}>({quizTarget.transliteration})</span>
                         </motion.div>
                     )}
@@ -393,6 +395,7 @@ export default function FamilyLesson({ onBack }: { onBack: () => void }) {
                                             <div className="devanagari" style={{ fontSize: '1.3rem', fontWeight: 900, color: colors.text, lineHeight: 1.2 }}>
                                                 {member.sanskrit}
                                             </div>
+                                            <AudioPronounceButton text={member.sanskrit} size={14} title={`Pronounce ${member.sanskrit}`} />
                                             <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', fontWeight: 600, marginTop: '2px' }}>
                                                 {member.transliteration}
                                             </div>
